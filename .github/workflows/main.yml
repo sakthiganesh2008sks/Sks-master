@@ -1,0 +1,160 @@
+name: Auto Run Flash Loan Bot
+
+on:
+  push:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'
+
+jobs:
+  start-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Start Python Global Scanner & Telegram Bot
+        run: |
+          cat << 'EOF' > bot.py
+          import json
+          import time
+          import urllib.request
+          import urllib.parse
+          import ssl
+
+          TELEGRAM_BOT_TOKEN = "9231641394:AAG8Iy40KqSetb0fzivnnv4Df2wr7-3Ykos"
+          TELEGRAM_CHAT_ID = "8915442014"
+          WALLET_ADDRESS = "0xe08E415Cd6eA703b1c09F3008C1e26341e502207"
+
+          FLASH_LOAN_INR = 1000000
+          AAVE_FEE_INR = FLASH_LOAN_INR * 0.0005  # ₹500
+          GAS_FEE_INR = 10                        # ₹10
+          TOTAL_REPAY_INR = FLASH_LOAN_INR + AAVE_FEE_INR + GAS_FEE_INR  # ₹10,00,510
+
+          TOKENS_TO_SCAN = ["ETH", "WBTC", "SOL", "MATIC", "AAVE", "UNI", "LINK", "ARB"]
+          ssl_context = ssl._create_unverified_context()
+
+          def send_telegram_msg(text):
+              url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+              data = urllib.parse.urlencode({
+                  "chat_id": TELEGRAM_CHAT_ID,
+                  "text": text,
+                  "parse_mode": "HTML",
+                  "disable_web_page_preview": "true"
+              }).encode("utf-8")
+              try:
+                  req = urllib.request.Request(url, data=data)
+                  with urllib.request.urlopen(req, context=ssl_context, timeout=10) as response:
+                      res = json.loads(response.read().decode("utf-8"))
+                      if res.get("ok"):
+                          print("✅ [Telegram] Message Sent Successfully!")
+                      else:
+                          print("❌ [Telegram API Error]", res)
+              except Exception as e:
+                  print(f"❌ [Telegram Failed] Make sure you clicked /start in your bot! Error: {e}")
+
+          def scan_global_dex_markets(symbol):
+              url = f"https://api.dexscreener.com/latest/dex/search?q={symbol}/USDC"
+              req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+              with urllib.request.urlopen(req, context=ssl_context, timeout=10) as resp:
+                  data = json.loads(resp.read().decode("utf-8"))
+
+              pairs = data.get("pairs", [])
+              valid_markets = []
+
+              for p in pairs:
+                  liquidity = p.get("liquidity", {}).get("usd", 0)
+                  price_usd = float(p.get("priceUsd", 0) or 0)
+                  base_sym = p.get("baseToken", {}).get("symbol", "").upper()
+
+                  if base_sym == symbol and price_usd > 0 and liquidity and float(liquidity) > 50000:
+                      valid_markets.append({
+                          "dex": p.get("dexId", "unknown").upper(),
+                          "chain": p.get("chainId", "unknown").upper(),
+                          "price": price_usd
+                      })
+
+              if len(valid_markets) < 2:
+                  return None
+
+              chains = {}
+              for m in valid_markets:
+                  chains.setdefault(m["chain"], []).append(m)
+
+              best_opportunity = None
+              for chain_name, markets in chains.items():
+                  if len(markets) < 2:
+                      continue
+                  lowest = min(markets, key=lambda x: x["price"])
+                  highest = max(markets, key=lambda x: x["price"])
+
+                  if lowest["dex"] == highest["dex"] and lowest["price"] == highest["price"]:
+                      continue
+
+                  coins_bought = FLASH_LOAN_INR / lowest["price"]
+                  gross_return_inr = coins_bought * highest["price"]
+                  net_profit_inr = gross_return_inr - TOTAL_REPAY_INR
+
+                  if (best_opportunity is None) or (net_profit_inr > best_opportunity["net_profit"]):
+                      best_opportunity = {
+                          "symbol": symbol,
+                          "chain": chain_name,
+                          "buy_dex": lowest["dex"],
+                          "buy_price": lowest["price"],
+                          "sell_dex": highest["dex"],
+                          "sell_price": highest["price"],
+                          "gross_return": gross_return_inr,
+                          "net_profit": net_profit_inr
+                      }
+
+              return best_opportunity
+
+          def run_bot():
+              print("🚀 Bot Started on GitHub Cloud!")
+              start_text = (
+                  f"🚀 <b>FLASH LOAN GLOBAL SCANNER STARTED!</b>\n\n"
+                  f"👛 <b>வாலட்:</b> <code>{WALLET_ADDRESS}</code>\n"
+                  f"💰 <b>ஃப்ளாஷ் லோன் தொகை:</b> ₹10,00,000\n"
+                  f"🏦 <b>திருப்பிக் கட்ட வேண்டியது:</b> ₹10,00,510\n\n"
+                  f"📡 <i>ஒவ்வொரு 10 செகண்டுக்கும் உலக மார்க்கெட் லைவ் ரிப்போர்ட் கீழே வரும்!</i>"
+              )
+              send_telegram_msg(start_text)
+
+              cycle = 0
+              while True:
+                  cycle += 1
+                  print(f"🔄 Running Scan Round #{cycle}...")
+                  report_lines = [f"📊 <b>LIVE SCAN REPORT #{cycle} (₹10 லட்சம் கணக்கு)</b>\n"]
+                  best_overall = None
+
+                  for token in TOKENS_TO_SCAN:
+                      try:
+                          res = scan_global_dex_markets(token)
+                          if res:
+                              status_icon = "🟢" if res["net_profit"] > 0 else "🔴"
+                              report_lines.append(
+                                  f"{status_icon} <b>{res['symbol']} ({res['chain']})</b>\n"
+                                  f"   • வாங்கும் இடம்: {res['buy_dex']} (${res['buy_price']:.4f})\n"
+                                  f"   • விற்கும் இடம்: {res['sell_dex']} (${res['sell_price']:.4f})\n"
+                                  f"   • ₹10 லட்சம் மாறுவது: <b>₹{res['gross_return']:,.0f}</b>\n"
+                                  f"   • நிகர லாபம்/நஷ்டம்: <b>₹{res['net_profit']:,.0f}</b>\n"
+                              )
+                              if (best_overall is None) or (res["net_profit"] > best_overall["net_profit"]):
+                                  best_overall = res
+                      except Exception as e:
+                          print(f"[Skip {token}] {e}")
+
+                  if best_overall and best_overall["net_profit"] > 0:
+                      report_lines.append(
+                          f"\n🔥 <b>சான்ஸ் மாட்டிக்கிச்சு!</b> {best_overall['symbol']} காயினில் "
+                          f"<b>₹{best_overall['net_profit']:,.0f} நிகர லாபம்</b> இருக்கு!"
+                      )
+                  else:
+                      report_lines.append("\n⏳ <i>தற்போது லாபம் இல்லை. அடுத்த ஸ்கேன் போகிறது...</i>")
+
+                  send_telegram_msg("\n".join(report_lines))
+                  time.sleep(10)
+
+          if __name__ == "__main__":
+              run_bot()
+          EOF
+          python3 -u bot.py
